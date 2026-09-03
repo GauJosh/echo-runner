@@ -232,6 +232,21 @@ const overlayTitle = document.getElementById("messageTitle");
 const overlayBody = document.getElementById("messageBody");
 const milestoneToastEl = document.getElementById("milestoneToast");
 
+// First-ever open gets a real tutorial (with the actual buttons pulsing to
+// draw the eye to them); every later open/retry just shows the familiar
+// score recap from endRun(). This matters more now that controls are two
+// specific buttons rather than something guessable like "tap the screen."
+let hasPlayedBefore = localStorage.getItem("echoRunner.hasPlayed") === "1";
+
+function showIdleTutorial() {
+  overlayTitle.textContent = "RUN";
+  overlayBody.innerHTML =
+    "<strong>▲</strong> jump (hold for higher) &nbsp; <strong>▼</strong> duck under obstacles<br />" +
+    "or SPACE / ↓ / Ctrl / Shift on keyboard<br />How far can you get?";
+  document.getElementById("jumpButton").classList.add("tutorialPulse");
+  document.getElementById("duckButton").classList.add("tutorialPulse");
+}
+
 function updateMilestoneToast() {
   if (milestoneToastTimer > 0) {
     milestoneToastEl.textContent = milestoneToastText;
@@ -286,39 +301,51 @@ window.addEventListener("keyup", (e) => {
     isDucking = false;
   }
 });
-// Touch/mouse split: upper ~55% of the screen = jump, lower = duck. Keyboard
-// (Space / ArrowDown / Ctrl / Shift) works independently and simultaneously
-// — this only covers the touch case, which had no duck input at all before.
-let activeTouchZone = null; // 'jump' | 'duck' | null, tracks what this pointer press started as
-
-function touchZoneForEvent(e) {
-  const rect = canvas.getBoundingClientRect();
-  const fracY = (e.clientY - rect.top) / rect.height;
-  return fracY < 0.55 ? "jump" : "duck";
-}
-
+// Tapping the canvas only starts a run from idle. Jump/duck during play are
+// handled by the two dedicated on-screen buttons below — real, visible,
+// labeled controls instead of an invisible top-half/bottom-half split,
+// which nobody could discover without being told.
 canvas.addEventListener("pointerdown", (e) => {
   e.preventDefault();
   if (state === STATE_IDLE) {
     requestJumpPress(); // tap anywhere starts the run
-    return;
   }
-  activeTouchZone = touchZoneForEvent(e);
-  if (activeTouchZone === "duck") {
+});
+
+const jumpButton = document.getElementById("jumpButton");
+const duckButton = document.getElementById("duckButton");
+
+function bindHoldButton(button, onPress, onRelease) {
+  const press = (e) => {
+    e.preventDefault();
+    button.classList.add("pressed");
+    onPress();
+  };
+  const release = (e) => {
+    e.preventDefault();
+    button.classList.remove("pressed");
+    onRelease();
+  };
+  button.addEventListener("pointerdown", press);
+  button.addEventListener("pointerup", release);
+  button.addEventListener("pointerleave", release);
+  button.addEventListener("pointercancel", release);
+}
+
+bindHoldButton(
+  jumpButton,
+  () => requestJumpPress(),
+  () => requestJumpRelease()
+);
+bindHoldButton(
+  duckButton,
+  () => {
     isDucking = true;
-  } else {
-    requestJumpPress();
-  }
-});
-canvas.addEventListener("pointerup", (e) => {
-  e.preventDefault();
-  if (activeTouchZone === "duck") {
+  },
+  () => {
     isDucking = false;
-  } else {
-    requestJumpRelease();
   }
-  activeTouchZone = null;
-});
+);
 
 // ---------------------------------------------------------------------------
 // Juice helpers
@@ -348,6 +375,12 @@ function triggerShake(magnitude, duration) {
 // Round lifecycle
 // ---------------------------------------------------------------------------
 function startRun() {
+  if (!hasPlayedBefore) {
+    hasPlayedBefore = true;
+    localStorage.setItem("echoRunner.hasPlayed", "1");
+    document.getElementById("jumpButton").classList.remove("tutorialPulse");
+    document.getElementById("duckButton").classList.remove("tutorialPulse");
+  }
   state = STATE_PLAYING;
   tick = 0;
   worldDistance = 0;
@@ -757,4 +790,7 @@ function frame(now) {
 }
 
 updateHud();
+if (!hasPlayedBefore) {
+  showIdleTutorial();
+}
 requestAnimationFrame(frame);
