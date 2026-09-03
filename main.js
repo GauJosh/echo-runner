@@ -59,6 +59,15 @@ function mulberry32(seed) {
   };
 }
 
+// Overhead ("duck under") obstacles don't appear until a bit into the run —
+// a gentle onboarding window with just the ground-obstacle rule before the
+// second rule (don't jump here) gets introduced. This is the "procedural
+// milestone" approach to a sense of stages, without hand-authoring levels.
+const OVERHEAD_INTRO_DISTANCE = 1200;
+const OVERHEAD_CHANCE = 0.35;
+const OVERHEAD_CLEARANCE_MIN = 20;
+const OVERHEAD_CLEARANCE_MAX = 30;
+
 function buildObstacleCourse() {
   const rand = mulberry32(20260903);
   const obstacles = [];
@@ -66,8 +75,14 @@ function buildObstacleCourse() {
   for (let i = 0; i < OBSTACLE_COUNT; i++) {
     distance += MIN_GAP_DIST + rand() * (MAX_GAP_DIST - MIN_GAP_DIST);
     const width = 26 + Math.floor(rand() * 20);
-    const height = 40 + Math.floor(rand() * 40);
-    obstacles.push({ spawnDistance: distance, width, height, cleared: false });
+
+    if (distance > OVERHEAD_INTRO_DISTANCE && rand() < OVERHEAD_CHANCE) {
+      const clearance = OVERHEAD_CLEARANCE_MIN + rand() * (OVERHEAD_CLEARANCE_MAX - OVERHEAD_CLEARANCE_MIN);
+      obstacles.push({ spawnDistance: distance, width, type: "overhead", clearance, cleared: false });
+    } else {
+      const height = 40 + Math.floor(rand() * 40);
+      obstacles.push({ spawnDistance: distance, width, type: "ground", height, cleared: false });
+    }
   }
   return obstacles;
 }
@@ -317,10 +332,20 @@ function step() {
     }
 
     if (screenX + halfW > PLAYER_X - PLAYER_RADIUS && screenX - halfW < PLAYER_X + PLAYER_RADIUS) {
-      const obstacleTopY = GROUND_Y - ob.height;
-      if (player.y + PLAYER_RADIUS > obstacleTopY) {
-        endRun();
-        return;
+      if (ob.type === "overhead") {
+        // Hangs from the top down to a low clearance — colliding means the
+        // player's head rose too high (jumped) instead of staying grounded.
+        const obstacleBottomY = GROUND_Y - ob.clearance;
+        if (player.y - PLAYER_RADIUS < obstacleBottomY) {
+          endRun();
+          return;
+        }
+      } else {
+        const obstacleTopY = GROUND_Y - ob.height;
+        if (player.y + PLAYER_RADIUS > obstacleTopY) {
+          endRun();
+          return;
+        }
       }
     }
     if (screenX > PLAYER_X + 40) break;
@@ -357,12 +382,20 @@ function render() {
   }
   ctx.stroke();
 
-  // Obstacles
-  ctx.fillStyle = "#ff5d5d";
+  // Obstacles — ground (red, jump over) vs overhead (cyan, stay under),
+  // deliberately different colors so the two opposite rules are instantly
+  // readable, not just inferable from position.
   for (const ob of OBSTACLE_COURSE) {
     const screenX = PLAYER_X + (ob.spawnDistance - worldDistance);
     if (screenX < -60 || screenX > LOGICAL_WIDTH + 60) continue;
-    ctx.fillRect(screenX - ob.width / 2, GROUND_Y - ob.height, ob.width, ob.height);
+    if (ob.type === "overhead") {
+      const bottomY = GROUND_Y - ob.clearance;
+      ctx.fillStyle = "#4dd9ff";
+      ctx.fillRect(screenX - ob.width / 2, -20, ob.width, bottomY + 20);
+    } else {
+      ctx.fillStyle = "#ff5d5d";
+      ctx.fillRect(screenX - ob.width / 2, GROUND_Y - ob.height, ob.width, ob.height);
+    }
   }
 
   // Particles
