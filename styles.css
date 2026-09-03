@@ -36,6 +36,21 @@ html, body {
   margin-top: 2px;
 }
 
+#milestoneToast {
+  position: fixed;
+  top: 60px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: #ffcc4d;
+  font-size: 18px;
+  font-weight: 700;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.7);
+  pointer-events: none;
+  user-select: none;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
 #messageOverlay {
   position: fixed;
   inset: 0;

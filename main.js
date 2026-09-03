@@ -59,17 +59,25 @@ function mulberry32(seed) {
   };
 }
 
-// Overhead ("duck under") obstacles don't appear until a bit into the run —
-// a gentle onboarding window with just the ground-obstacle rule before the
-// second rule (don't jump here) gets introduced. This is the "procedural
-// milestone" approach to a sense of stages, without hand-authoring levels.
+// Milestones — each unlocks a new obstacle type at a distance threshold, a
+// gentle onboarding ramp instead of hand-authored levels (see CLAUDE.md).
+// Max jump clears ~101 units (v²/2g + radius margin) — ground obstacle
+// heights stay well under that so every one is always physically clearable.
 const OVERHEAD_INTRO_DISTANCE = 1200;
 const OVERHEAD_CHANCE = 0.35;
 const OVERHEAD_CLEARANCE_MIN = 20;
 const OVERHEAD_CLEARANCE_MAX = 30;
 
-function buildObstacleCourse() {
-  const rand = mulberry32(20260903);
+const FLYING_INTRO_DISTANCE = 2600;
+const FLYING_CHANCE = 0.4; // of eligible (non-overhead) obstacles past the intro distance
+
+const MILESTONES = [
+  { distance: OVERHEAD_INTRO_DISTANCE, message: "Duck! Obstacles overhead now" },
+  { distance: FLYING_INTRO_DISTANCE, message: "Incoming flyers!" },
+];
+
+function buildObstacleCourse(seed) {
+  const rand = mulberry32(seed);
   const obstacles = [];
   let distance = 700;
   for (let i = 0; i < OBSTACLE_COUNT; i++) {
@@ -78,15 +86,20 @@ function buildObstacleCourse() {
 
     if (distance > OVERHEAD_INTRO_DISTANCE && rand() < OVERHEAD_CHANCE) {
       const clearance = OVERHEAD_CLEARANCE_MIN + rand() * (OVERHEAD_CLEARANCE_MAX - OVERHEAD_CLEARANCE_MIN);
-      obstacles.push({ spawnDistance: distance, width, type: "overhead", clearance, cleared: false });
+      const flying = distance > FLYING_INTRO_DISTANCE && rand() < FLYING_CHANCE;
+      obstacles.push({ spawnDistance: distance, width, type: "overhead", clearance, flying, cleared: false });
     } else {
+      // Randomized per obstacle, and the whole course is reseeded fresh each
+      // run (see startRun) — never the same layout twice, always within a
+      // height range that stays comfortably clearable.
       const height = 40 + Math.floor(rand() * 40);
-      obstacles.push({ spawnDistance: distance, width, type: "ground", height, cleared: false });
+      const flying = distance > FLYING_INTRO_DISTANCE && rand() < FLYING_CHANCE;
+      obstacles.push({ spawnDistance: distance, width, type: "ground", height, flying, cleared: false });
     }
   }
   return obstacles;
 }
-let OBSTACLE_COURSE = buildObstacleCourse();
+let OBSTACLE_COURSE = buildObstacleCourse(Date.now());
 
 // ---------------------------------------------------------------------------
 // Audio — tiny synthesized sound effects via Web Audio API. No asset files,
@@ -149,6 +162,10 @@ let particles = [];
 let shakeTimer = 0;
 let shakeMagnitude = 0;
 
+let announcedMilestones = new Set();
+let milestoneToastText = "";
+let milestoneToastTimer = 0;
+
 let bestDistance = Number(localStorage.getItem("echoRunner.bestDistance") || 0);
 
 const hudRound = document.getElementById("roundLine");
@@ -156,6 +173,16 @@ const hudDistance = document.getElementById("distanceLine");
 const overlay = document.getElementById("messageOverlay");
 const overlayTitle = document.getElementById("messageTitle");
 const overlayBody = document.getElementById("messageBody");
+const milestoneToastEl = document.getElementById("milestoneToast");
+
+function updateMilestoneToast() {
+  if (milestoneToastTimer > 0) {
+    milestoneToastEl.textContent = milestoneToastText;
+    milestoneToastEl.style.opacity = "1";
+  } else {
+    milestoneToastEl.style.opacity = "0";
+  }
+}
 
 function metersLabel(distanceUnits) {
   return Math.floor(distanceUnits / 20);
@@ -242,7 +269,10 @@ function startRun() {
   jumpPressRequested = false;
   jumpReleaseRequested = false;
   particles = [];
-  for (const ob of OBSTACLE_COURSE) ob.cleared = false;
+  announcedMilestones = new Set();
+  milestoneToastText = "";
+  milestoneToastTimer = 0;
+  OBSTACLE_COURSE = buildObstacleCourse(Date.now()); // fresh layout every run
   overlay.classList.add("hidden");
   updateHud();
 }
@@ -289,6 +319,15 @@ function step() {
   tick += 1;
   currentScrollSpeed = BASE_SCROLL_SPEED + (MAX_SCROLL_SPEED - BASE_SCROLL_SPEED) * Math.min(1, worldDistance / SPEED_RAMP_DISTANCE);
   worldDistance += currentScrollSpeed * FIXED_DT;
+
+  for (const m of MILESTONES) {
+    if (worldDistance >= m.distance && !announcedMilestones.has(m)) {
+      announcedMilestones.add(m);
+      milestoneToastText = m.message;
+      milestoneToastTimer = 2.5;
+    }
+  }
+  if (milestoneToastTimer > 0) milestoneToastTimer = Math.max(0, milestoneToastTimer - FIXED_DT);
 
   if (jumpPressRequested) {
     if (isGrounded(player)) {
@@ -355,6 +394,28 @@ function step() {
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
+function drawBird(x, centerY, span) {
+  const bob = Math.sin(tick * 0.25 + x * 0.05) * 4;
+  const y = centerY + bob;
+  const wingSpread = Math.sin(tick * 0.4 + x * 0.05) * (span * 0.3) + span * 0.35;
+  ctx.fillStyle = "#ffcc4d";
+  ctx.beginPath();
+  ctx.ellipse(x, y, span * 0.28, span * 0.18, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(x - wingSpread, y - 4);
+  ctx.lineTo(x, y - 10);
+  ctx.lineTo(x, y);
+  ctx.closePath();
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(x + wingSpread, y - 4);
+  ctx.lineTo(x, y - 10);
+  ctx.lineTo(x, y);
+  ctx.closePath();
+  ctx.fill();
+}
+
 function render() {
   ctx.save();
   if (shakeTimer > 0) {
@@ -384,14 +445,23 @@ function render() {
 
   // Obstacles — ground (red, jump over) vs overhead (cyan, stay under),
   // deliberately different colors so the two opposite rules are instantly
-  // readable, not just inferable from position.
+  // readable, not just inferable from position. "Flying" variants use the
+  // exact same hitbox/rule as their type, just drawn as a bobbing bird
+  // (amber) instead of a static block — new presentation, same mechanic.
   for (const ob of OBSTACLE_COURSE) {
     const screenX = PLAYER_X + (ob.spawnDistance - worldDistance);
     if (screenX < -60 || screenX > LOGICAL_WIDTH + 60) continue;
+
     if (ob.type === "overhead") {
       const bottomY = GROUND_Y - ob.clearance;
-      ctx.fillStyle = "#4dd9ff";
-      ctx.fillRect(screenX - ob.width / 2, -20, ob.width, bottomY + 20);
+      if (ob.flying) {
+        drawBird(screenX, bottomY - 10, ob.width);
+      } else {
+        ctx.fillStyle = "#4dd9ff";
+        ctx.fillRect(screenX - ob.width / 2, -20, ob.width, bottomY + 20);
+      }
+    } else if (ob.flying) {
+      drawBird(screenX, GROUND_Y - ob.height / 2, ob.width);
     } else {
       ctx.fillStyle = "#ff5d5d";
       ctx.fillRect(screenX - ob.width / 2, GROUND_Y - ob.height, ob.width, ob.height);
@@ -439,7 +509,10 @@ function frame(now) {
   }
 
   render();
-  if (state === STATE_PLAYING) updateHud();
+  if (state === STATE_PLAYING) {
+    updateHud();
+    updateMilestoneToast();
+  }
 }
 
 updateHud();
