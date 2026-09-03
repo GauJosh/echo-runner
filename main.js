@@ -36,7 +36,12 @@ const GROUND_EPSILON = 0.5;
 // player's effective top to this much lower value — always safely under any
 // overhead clearance, whereas standing (604) is always above it (unsafe).
 // That's what makes ducking a real, necessary action instead of the default.
-const DUCK_EFFECTIVE_TOP = GROUND_Y + 6;
+// Kept close to GROUND_Y (not far below it) specifically so the "lying
+// flat" duck pose can be drawn at a matching height — the previous value
+// (626, well below ground) had no visual pose that could honestly match it,
+// which was the actual bug: the drawing didn't look low enough to justify
+// how safe the hitbox claimed to be.
+const DUCK_EFFECTIVE_TOP = GROUND_Y - 2;
 
 // Difficulty ramps with distance, not with an artificial mechanic — the
 // proven approach (Chrome Dino, etc.). Obstacle gaps are fixed in world
@@ -598,10 +603,35 @@ function drawPlayer() {
 
   ctx.save();
   ctx.translate(PLAYER_X, player.y);
+
+  if (ducking) {
+    // Genuinely lying flat, drawn at fixed low coordinates rather than the
+    // generic squash scale — its highest point (~world GROUND_Y-10) is
+    // deliberately close to DUCK_EFFECTIVE_TOP, so what's drawn actually
+    // matches what the collision check treats as safe. The previous version
+    // just scaled the standing pose down a bit, which never got low enough
+    // to visually justify clearing a low-hanging obstacle.
+    ctx.fillStyle = "#ffffff";
+    ctx.beginPath();
+    ctx.ellipse(-2, -5, 22, 5, 0, 0, Math.PI * 2); // prone body, low and flat
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(-21, -7, 5, 0, Math.PI * 2); // head, forward and low
+    ctx.fill();
+    ctx.strokeStyle = "#c9c9d9";
+    ctx.lineWidth = 4;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(16, -3);
+    ctx.lineTo(25, 1); // trailing legs, flat
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+
   ctx.scale(player.squashX, player.squashY);
 
-  // Legs — running swing on the ground, tucked while airborne, still while
-  // ducking (the squash transform already reads as "crouched").
+  // Legs — running swing on the ground, tucked while airborne.
   ctx.strokeStyle = "#c9c9d9";
   ctx.lineWidth = 5;
   ctx.lineCap = "round";
@@ -612,7 +642,7 @@ function drawPlayer() {
     ctx.moveTo(4, -6);
     ctx.lineTo(10, 6);
   } else {
-    const swing = ducking ? 0 : Math.sin(tick * 0.55) * 10;
+    const swing = Math.sin(tick * 0.55) * 10;
     ctx.moveTo(-3, -8);
     ctx.lineTo(-3 + swing, 4);
     ctx.moveTo(3, -8);
