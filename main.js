@@ -493,6 +493,120 @@ function drawBird(x, centerY, span) {
   ctx.fill();
 }
 
+// Sky/hill palette shifts per stage — a cheap, purely cosmetic way to make
+// stage progress *feel* like it's going somewhere, not just a number ticking.
+const STAGE_THEMES = [
+  { sky: ["#2b2d5e", "#4a3f7a"], farHill: "#241f47", nearHill: "#332a5c" },
+  { sky: ["#1f3a5f", "#3f6b9e"], farHill: "#1a2d4a", nearHill: "#26426b" },
+  { sky: ["#2f1f4f", "#6b3f8a"], farHill: "#241a3d", nearHill: "#3a2860" },
+  { sky: ["#1a1a3a", "#4a2f6f"], farHill: "#14142c", nearHill: "#241f47" },
+];
+function themeForStage(stage) {
+  return STAGE_THEMES[Math.min(stage - 1, STAGE_THEMES.length - 1)];
+}
+
+function drawHillLayer(baseY, amplitude, wavelength, parallaxFactor, color) {
+  const scrollOffset = worldDistance * parallaxFactor;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(-20, LOGICAL_HEIGHT + 20);
+  for (let x = -20; x <= LOGICAL_WIDTH + 20; x += 24) {
+    const phase = (x + scrollOffset) * ((Math.PI * 2) / wavelength);
+    const y = baseY - Math.sin(phase) * amplitude - Math.sin(phase * 0.37) * amplitude * 0.4;
+    ctx.lineTo(x, y);
+  }
+  ctx.lineTo(LOGICAL_WIDTH + 20, LOGICAL_HEIGHT + 20);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawGroundObstacle(x, w, h) {
+  const top = GROUND_Y - h;
+  const grad = ctx.createLinearGradient(0, top, 0, GROUND_Y);
+  grad.addColorStop(0, "#ff8a7a");
+  grad.addColorStop(1, "#d43f3f");
+  ctx.fillStyle = grad;
+  ctx.fillRect(x - w / 2, top, w, h);
+  ctx.strokeStyle = "rgba(0,0,0,0.25)";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(x - w / 2, top, w, h);
+  // Hazard stripes
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x - w / 2, top, w, h);
+  ctx.clip();
+  ctx.strokeStyle = "rgba(255,255,255,0.25)";
+  ctx.lineWidth = 4;
+  for (let sx = x - w / 2 - h; sx < x + w / 2 + h; sx += 14) {
+    ctx.beginPath();
+    ctx.moveTo(sx, top);
+    ctx.lineTo(sx + h, GROUND_Y);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawOverheadObstacle(x, w, bottomY) {
+  const grad = ctx.createLinearGradient(0, -20, 0, bottomY);
+  grad.addColorStop(0, "#2f9fc9");
+  grad.addColorStop(1, "#7de6ff");
+  ctx.fillStyle = grad;
+  ctx.fillRect(x - w / 2, -20, w, bottomY + 20);
+  // Jagged "icicle" bottom edge instead of a flat line, reads as hanging.
+  ctx.beginPath();
+  ctx.moveTo(x - w / 2, bottomY);
+  const teeth = Math.max(2, Math.floor(w / 12));
+  for (let i = 0; i <= teeth; i++) {
+    const tx = x - w / 2 + (w / teeth) * i;
+    const ty = i % 2 === 0 ? bottomY + 8 : bottomY;
+    ctx.lineTo(tx, ty);
+  }
+  ctx.lineTo(x + w / 2, -20);
+  ctx.lineTo(x - w / 2, -20);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawPlayer() {
+  const grounded = isGrounded(player);
+  const ducking = isDucking && grounded;
+
+  ctx.save();
+  ctx.translate(PLAYER_X, player.y);
+  ctx.scale(player.squashX, player.squashY);
+
+  // Legs — running swing on the ground, tucked while airborne, still while
+  // ducking (the squash transform already reads as "crouched").
+  ctx.strokeStyle = "#c9c9d9";
+  ctx.lineWidth = 5;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  if (!grounded) {
+    ctx.moveTo(-4, -6);
+    ctx.lineTo(-10, 6);
+    ctx.moveTo(4, -6);
+    ctx.lineTo(10, 6);
+  } else {
+    const swing = ducking ? 0 : Math.sin(tick * 0.55) * 10;
+    ctx.moveTo(-3, -8);
+    ctx.lineTo(-3 + swing, 4);
+    ctx.moveTo(3, -8);
+    ctx.lineTo(3 - swing, 4);
+  }
+  ctx.stroke();
+
+  // Torso + head
+  ctx.fillStyle = "#ffffff";
+  ctx.beginPath();
+  ctx.ellipse(0, -PLAYER_RADIUS - 2, PLAYER_RADIUS * 0.7, PLAYER_RADIUS * 0.85, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(0, -PLAYER_RADIUS * 2, PLAYER_RADIUS * 0.55, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
 function render() {
   ctx.save();
   if (shakeTimer > 0) {
@@ -500,14 +614,24 @@ function render() {
     ctx.translate((Math.random() - 0.5) * s, (Math.random() - 0.5) * s);
   }
 
+  const theme = themeForStage(stageForDistance(worldDistance));
+
   const sky = ctx.createLinearGradient(0, 0, 0, LOGICAL_HEIGHT);
-  sky.addColorStop(0, "#2b2d5e");
-  sky.addColorStop(1, "#4a3f7a");
+  sky.addColorStop(0, theme.sky[0]);
+  sky.addColorStop(1, theme.sky[1]);
   ctx.fillStyle = sky;
   ctx.fillRect(-20, -20, LOGICAL_WIDTH + 40, LOGICAL_HEIGHT + 40);
 
+  // Parallax hills — far layer scrolls slowly, near layer faster, both well
+  // behind the play area so they never compete with obstacle readability.
+  drawHillLayer(GROUND_Y - 90, 26, 260, 0.015, theme.farHill);
+  drawHillLayer(GROUND_Y - 40, 18, 160, 0.05, theme.nearHill);
+
   // Ground with scrolling dashes for a sense of speed.
-  ctx.fillStyle = "#12121f";
+  const groundGrad = ctx.createLinearGradient(0, GROUND_Y, 0, LOGICAL_HEIGHT);
+  groundGrad.addColorStop(0, "#17162a");
+  groundGrad.addColorStop(1, "#0a0a14");
+  ctx.fillStyle = groundGrad;
   ctx.fillRect(-20, GROUND_Y, LOGICAL_WIDTH + 40, LOGICAL_HEIGHT - GROUND_Y + 20);
   ctx.strokeStyle = "rgba(255,255,255,0.25)";
   ctx.lineWidth = 3;
@@ -532,12 +656,9 @@ function render() {
     if (ob.flying) {
       drawBird(screenX, birdCenterY(ob), ob.width);
     } else if (ob.type === "overhead") {
-      const bottomY = GROUND_Y - ob.clearance;
-      ctx.fillStyle = "#4dd9ff";
-      ctx.fillRect(screenX - ob.width / 2, -20, ob.width, bottomY + 20);
+      drawOverheadObstacle(screenX, ob.width, GROUND_Y - ob.clearance);
     } else {
-      ctx.fillStyle = "#ff5d5d";
-      ctx.fillRect(screenX - ob.width / 2, GROUND_Y - ob.height, ob.width, ob.height);
+      drawGroundObstacle(screenX, ob.width, ob.height);
     }
   }
 
@@ -550,15 +671,7 @@ function render() {
     ctx.fill();
   }
 
-  // Player, with squash/stretch
-  ctx.save();
-  ctx.translate(PLAYER_X, player.y);
-  ctx.scale(player.squashX, player.squashY);
-  ctx.fillStyle = "#ffffff";
-  ctx.beginPath();
-  ctx.arc(0, -PLAYER_RADIUS, PLAYER_RADIUS, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
+  drawPlayer();
 
   ctx.restore();
 }
