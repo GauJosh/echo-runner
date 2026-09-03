@@ -1,0 +1,14 @@
+{
+  "name": "echo-runner",
+  "private": true,
+  "description": "One-button endless runner. The game itself has zero dependencies (plain HTML/CSS/JS); these are CI/dev tooling only.",
+  "scripts": {
+    "serve": "node serve.js",
+    "lint": "eslint main.js serve.js",
+    "test": "node smoke-test.mjs"
+  },
+  "devDependencies": {
+    "eslint": "^9.13.0",
+    "playwright": "^1.48.0"
+  }
+}

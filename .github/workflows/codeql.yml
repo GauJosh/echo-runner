@@ -1,0 +1,31 @@
+name: CodeQL
+
+# Runs independently of CI & Deploy, deliberately not a gate on it.
+# CodeQL analysis takes a few minutes -- fine for an ongoing security-alert
+# feed (results land in the repo's Security tab), but slowing down every
+# single push's deploy by that much isn't worth it for a small static game.
+# Runs on every push/PR to main, plus a weekly sweep to catch newly
+# disclosed vulnerability patterns in unchanged code.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * 1" # Mondays, 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+      - uses: github/codeql-action/analyze@v3

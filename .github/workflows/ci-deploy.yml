@@ -1,0 +1,89 @@
+name: CI & Deploy
+
+# Sequential gate: lint -> smoke-test -> build -> deploy. Each stage only
+# runs if the previous one passed, and deploy only runs on an actual push
+# to main (not on pull requests, which still get lint/smoke-test/build as
+# a check but shouldn't publish anything).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Syntax check
+        run: |
+          node --check main.js
+          node --check serve.js
+      - name: Lint
+        run: npm run lint
+
+  smoke-test:
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Start local server
+        run: node serve.js &
+      - name: Wait for server
+        run: |
+          for i in $(seq 1 20); do
+            curl -sf http://localhost:8080/ && exit 0
+            sleep 0.5
+          done
+          echo "Server never came up" >&2
+          exit 1
+      - name: Run smoke test
+        run: npm test
+
+  build:
+    runs-on: ubuntu-latest
+    needs: smoke-test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare site directory
+        run: |
+          mkdir _site
+          cp index.html main.js styles.css _site/
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
