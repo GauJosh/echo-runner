@@ -32,6 +32,11 @@ const GROUND_Y = 620;
 const PLAYER_X = 120;
 const PLAYER_RADIUS = 16;
 const GROUND_EPSILON = 0.5;
+// Standing height (GROUND_Y - PLAYER_RADIUS = 604). Ducking overrides the
+// player's effective top to this much lower value — always safely under any
+// overhead clearance, whereas standing (604) is always above it (unsafe).
+// That's what makes ducking a real, necessary action instead of the default.
+const DUCK_EFFECTIVE_TOP = GROUND_Y + 6;
 
 // Difficulty ramps with distance, not with an artificial mechanic — the
 // proven approach (Chrome Dino, etc.). Obstacle gaps are fixed in world
@@ -65,8 +70,13 @@ function mulberry32(seed) {
 // heights stay well under that so every one is always physically clearable.
 const OVERHEAD_INTRO_DISTANCE = 1200;
 const OVERHEAD_CHANCE = 0.35;
-const OVERHEAD_CLEARANCE_MIN = 20;
-const OVERHEAD_CLEARANCE_MAX = 30;
+// Standing top is a fixed 604 (GROUND_Y - PLAYER_RADIUS). Clearance is kept
+// in a range where GROUND_Y - clearance always lands a bit ABOVE 604, so
+// standing always collides and only ducking (top -> DUCK_EFFECTIVE_TOP=626)
+// clears it. The first version used 20-30, which put the clearance line
+// below 604 — standing was already safe, so ducking had nothing to do.
+const OVERHEAD_CLEARANCE_MIN = 6;
+const OVERHEAD_CLEARANCE_MAX = 14;
 
 const FLYING_INTRO_DISTANCE = 2600;
 const FLYING_CHANCE = 0.4; // of eligible (non-overhead) obstacles past the intro distance
@@ -74,9 +84,10 @@ const FLYING_CHANCE = 0.4; // of eligible (non-overhead) obstacles past the intr
 // Flying obstacles get a compact hitbox matching their actual (small) visual
 // size, not the full ground/overhead box they're tagged with — using the
 // full box caused invisible collisions well above/below the visible bird.
+// Shrunk further after still feeling too generous even after the first fix.
 // They also gain extra closing speed once on screen, so they read as
 // darting toward the player rather than drifting in with the scenery.
-const BIRD_HITBOX_HALF_HEIGHT = 22;
+const BIRD_HITBOX_HALF_HEIGHT = 11;
 const FLYING_EXTRA_SPEED = 90;
 
 function birdCenterY(ob) {
@@ -174,6 +185,18 @@ let currentScrollSpeed = BASE_SCROLL_SPEED;
 const player = { y: GROUND_Y, vy: 0, squashX: 1, squashY: 1 };
 let jumpPressRequested = false;
 let jumpReleaseRequested = false;
+let isDucking = false;
+
+// Effective collision top: DUCK_EFFECTIVE_TOP while ducking-and-grounded
+// (ducking mid-air isn't meaningful), otherwise the normal head height.
+// Only overhead-type hazards care about this — ground obstacles/birds you
+// jump over still use the normal bottom (see playerBottomY).
+function playerTopY() {
+  return isDucking && isGrounded(player) ? DUCK_EFFECTIVE_TOP : player.y - PLAYER_RADIUS;
+}
+function playerBottomY() {
+  return player.y + PLAYER_RADIUS;
+}
 
 let particles = [];
 let shakeTimer = 0;
@@ -225,17 +248,25 @@ function requestJumpRelease() {
   jumpReleaseRequested = true;
 }
 
+const DUCK_KEYS = new Set(["ArrowDown", "ControlLeft", "ControlRight", "ShiftLeft", "ShiftRight"]);
+
 window.addEventListener("keydown", (e) => {
   if (e.code === "Space") {
     e.preventDefault();
     if (e.repeat) return;
     requestJumpPress();
+  } else if (DUCK_KEYS.has(e.code)) {
+    e.preventDefault();
+    isDucking = true;
   }
 });
 window.addEventListener("keyup", (e) => {
   if (e.code === "Space") {
     e.preventDefault();
     requestJumpRelease();
+  } else if (DUCK_KEYS.has(e.code)) {
+    e.preventDefault();
+    isDucking = false;
   }
 });
 canvas.addEventListener("pointerdown", (e) => {
@@ -362,9 +393,14 @@ function step() {
   }
   integrate(player);
 
-  // Squash/stretch relaxes back toward normal each tick.
-  player.squashX += (1 - player.squashX) * 0.2;
-  player.squashY += (1 - player.squashY) * 0.2;
+  // Squash/stretch relaxes back toward normal each tick — except while
+  // actually ducking (grounded), where it eases toward a crouched pose
+  // instead, so the visual clearly communicates the lowered hitbox.
+  const duckingNow = isDucking && isGrounded(player);
+  const targetSquashX = duckingNow ? 1.4 : 1;
+  const targetSquashY = duckingNow ? 0.45 : 1;
+  player.squashX += (targetSquashX - player.squashX) * 0.3;
+  player.squashY += (targetSquashY - player.squashY) * 0.3;
 
   // Particles
   for (const p of particles) {
@@ -392,24 +428,27 @@ function step() {
 
     if (screenX + halfW > PLAYER_X - PLAYER_RADIUS && screenX - halfW < PLAYER_X + PLAYER_RADIUS) {
       if (ob.flying) {
-        // Compact band matching the actual bird graphic, not the full
-        // ground/overhead box — see the comment by BIRD_HITBOX_HALF_HEIGHT.
+        // Compact band matching the actual bird graphic, using the same
+        // duck-aware top as everything else — ducking can save you from a
+        // low bird, jumping (or already being airborne) can clear a high one.
         const centerY = birdCenterY(ob);
-        if (player.y + PLAYER_RADIUS > centerY - BIRD_HITBOX_HALF_HEIGHT && player.y - PLAYER_RADIUS < centerY + BIRD_HITBOX_HALF_HEIGHT) {
+        if (playerBottomY() > centerY - BIRD_HITBOX_HALF_HEIGHT && playerTopY() < centerY + BIRD_HITBOX_HALF_HEIGHT) {
           endRun();
           return;
         }
       } else if (ob.type === "overhead") {
         // Hangs from the top down to a low clearance — colliding means the
-        // player's head rose too high (jumped) instead of staying grounded.
+        // player's effective top (head, or DUCK_EFFECTIVE_TOP if ducking)
+        // rose too high. Standing alone is never enough clearance now —
+        // ducking is a real, required action.
         const obstacleBottomY = GROUND_Y - ob.clearance;
-        if (player.y - PLAYER_RADIUS < obstacleBottomY) {
+        if (playerTopY() < obstacleBottomY) {
           endRun();
           return;
         }
       } else {
         const obstacleTopY = GROUND_Y - ob.height;
-        if (player.y + PLAYER_RADIUS > obstacleTopY) {
+        if (playerBottomY() > obstacleTopY) {
           endRun();
           return;
         }
