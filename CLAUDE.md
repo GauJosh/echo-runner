@@ -71,3 +71,24 @@ until there's a working, fun game.
 ## Status
 
 2026-09-03: Design finalized, implementation starting.
+
+**2026-09-03 (later same day): ghost/echo mechanic dropped, pending re-evaluation.**
+Built the full echo mechanic (deterministic course, fixed-timestep ghost
+replay, variable jump height, record-gated ghost addition to fix a
+front-loaded-difficulty problem) — but after several rounds of real
+playtesting, it still didn't feel fun, even once every bug was fixed and
+difficulty was reasonably tuned. Rather than keep tuning an unproven
+mechanic, fell back to the proven core: plain one-button obstacle dodging
+(Flappy Bird / Chrome Dino style), no ghosts, difficulty ramping via
+increasing scroll speed over distance (the standard, known-to-work approach)
+instead of accumulating self-competition. Effort redirected into game feel
+("juice"): screen shake on death, squash/stretch on jump/land, particles,
+synthesized sound effects (Web Audio API, no asset files).
+
+The ghost mechanic's code still exists in git history (see the commit before
+this note) if it's worth revisiting later as an optional mode — but only
+after the plain version is confirmed to actually be fun on its own. Lesson:
+validate a novel mechanic's fun-factor with the simplest possible version
+*before* building out its full complexity (recording, replay, collision
+rules, difficulty pacing) — tuning difficulty on an unproven-fun mechanic is
+solving the wrong problem.

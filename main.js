@@ -1,14 +1,10 @@
-// Echo Runner — single-button endless runner where you compete against
-// replays of your own past runs. See CLAUDE.md for the full design
-// rationale (fixed deterministic course, fixed-timestep replay, no ghost
-// cap). Single flat file deliberately — small scope, prove it's fun first.
+// Echo Runner — simplified back to the proven core: one-button dodge/jump,
+// no ghosts (see CLAUDE.md — the ghost/echo mechanic wasn't landing as fun
+// even once correctly implemented, so we're falling back to the genre that's
+// reliably fun — Flappy Bird / Chrome Dino style — and focusing effort on
+// feel (juice) instead of mechanic novelty). Ghosts may return later as an
+// optional mode if this baseline is actually fun first.
 
-// ---------------------------------------------------------------------------
-// Fixed logical resolution — physics/positions are always defined in this
-// coordinate space regardless of actual device screen size, then the canvas
-// element is scaled (via CSS) to fit the viewport. This keeps game feel and
-// (critically) ghost-replay determinism identical across devices.
-// ---------------------------------------------------------------------------
 const LOGICAL_WIDTH = 480;
 const LOGICAL_HEIGHT = 800;
 
@@ -26,42 +22,32 @@ window.addEventListener("resize", fitCanvasToViewport);
 fitCanvasToViewport();
 
 // ---------------------------------------------------------------------------
-// Constants (logical units — pixels in the fixed 480x800 space)
+// Constants
 // ---------------------------------------------------------------------------
 const FIXED_DT = 1 / 60;
 const GRAVITY = 1800;
 const JUMP_VELOCITY = -650;
-const SCROLL_SPEED = 260; // logical units/sec
+const JUMP_CUT_MULTIPLIER = 0.45; // release early for a shorter hop — real control, not just timing
 const GROUND_Y = 620;
 const PLAYER_X = 120;
 const PLAYER_RADIUS = 16;
-const GHOST_RADIUS = 14;
 const GROUND_EPSILON = 0.5;
-const GHOST_COLLIDE_Y_THRESHOLD = PLAYER_RADIUS + GHOST_RADIUS - 6; // slight forgiveness
-// Jump peak is ~117 units above GROUND_Y. Everyone passes briefly through the
-// near-ground band on every single jump (launch and landing) — without this
-// gate, two completely unrelated jumps coincidentally clipping that band at
-// the same tick registers as a "collision" far more often than intended,
-// since it's just launch/landing noise, not two jump arcs actually crossing
-// in the air. Requiring both to be at least this far off the ground before
-// checking proximity filters that noise out.
-const GHOST_COLLIDE_MIN_HEIGHT_ABOVE_GROUND = 30;
-// Variable jump height (Mario-style "jump cut"): releasing early while still
-// rising scales velocity down, producing a shorter hop. Holding through the
-// natural peak has no extra effect (already at max height for this press).
-// This gives the player a second axis of control beyond WHEN to jump — HOW
-// HIGH — so avoiding a ghost doesn't depend entirely on split-second timing.
-const JUMP_CUT_MULTIPLIER = 0.45;
-const SAFETY_MAX_GHOSTS = 30; // performance safety valve, not a designed difficulty cap — see CLAUDE.md
 
-const MIN_GAP_SECONDS = 1.15;
-const MAX_GAP_SECONDS = 2.3;
-const OBSTACLE_COUNT = 300; // far more than any real run will reach
+// Difficulty ramps with distance, not with an artificial mechanic — the
+// proven approach (Chrome Dino, etc.). Obstacle gaps are fixed in world
+// distance; ramping speed alone naturally reduces reaction time over time.
+const BASE_SCROLL_SPEED = 260;
+const MAX_SCROLL_SPEED = 480;
+const SPEED_RAMP_DISTANCE = 5000; // world units to reach max speed
+
+const MIN_GAP_DIST = 300;
+const MAX_GAP_DIST = 560;
+const OBSTACLE_COUNT = 400;
 
 // ---------------------------------------------------------------------------
-// Deterministic obstacle course — same seed every load, so every run (and
-// every ghost replay) sees the identical sequence. mulberry32: small, fast,
-// well-known deterministic PRNG.
+// Deterministic obstacle course (no gameplay reason it must be deterministic
+// anymore without ghosts, but it's free, and it means every player sees a
+// hand-tunable, reproducible course rather than pure randomness).
 // ---------------------------------------------------------------------------
 function mulberry32(seed) {
   return function () {
@@ -74,19 +60,60 @@ function mulberry32(seed) {
 }
 
 function buildObstacleCourse() {
-  const rand = mulberry32(20260903); // fixed seed
+  const rand = mulberry32(20260903);
   const obstacles = [];
-  let distance = 700; // first obstacle spawns a bit further out so the opening is fair
+  let distance = 700;
   for (let i = 0; i < OBSTACLE_COUNT; i++) {
-    const gapSeconds = MIN_GAP_SECONDS + rand() * (MAX_GAP_SECONDS - MIN_GAP_SECONDS);
-    distance += gapSeconds * SCROLL_SPEED;
+    distance += MIN_GAP_DIST + rand() * (MAX_GAP_DIST - MIN_GAP_DIST);
     const width = 26 + Math.floor(rand() * 20);
     const height = 40 + Math.floor(rand() * 40);
-    obstacles.push({ spawnDistance: distance, width, height });
+    obstacles.push({ spawnDistance: distance, width, height, cleared: false });
   }
   return obstacles;
 }
-const OBSTACLE_COURSE = buildObstacleCourse();
+let OBSTACLE_COURSE = buildObstacleCourse();
+
+// ---------------------------------------------------------------------------
+// Audio — tiny synthesized sound effects via Web Audio API. No asset files,
+// no loading, works the moment the page does. Browsers require audio to
+// start after a user gesture, so the context is created lazily on first input.
+// ---------------------------------------------------------------------------
+let audioCtx = null;
+function ensureAudio() {
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  return audioCtx;
+}
+
+function playTone({ freq, duration, type = "sine", startFreq, endFreq, gain = 0.15 }) {
+  const ctxA = ensureAudio();
+  const osc = ctxA.createOscillator();
+  const gainNode = ctxA.createGain();
+  osc.type = type;
+  const now = ctxA.currentTime;
+  if (startFreq && endFreq) {
+    osc.frequency.setValueAtTime(startFreq, now);
+    osc.frequency.exponentialRampToValueAtTime(endFreq, now + duration);
+  } else {
+    osc.frequency.setValueAtTime(freq, now);
+  }
+  gainNode.gain.setValueAtTime(gain, now);
+  gainNode.gain.exponentialRampToValueAtTime(0.001, now + duration);
+  osc.connect(gainNode).connect(ctxA.destination);
+  osc.start(now);
+  osc.stop(now + duration);
+}
+
+function sfxJump() {
+  playTone({ startFreq: 380, endFreq: 720, duration: 0.12, type: "square", gain: 0.1 });
+}
+function sfxClear() {
+  playTone({ freq: 900, duration: 0.08, type: "sine", gain: 0.06 });
+}
+function sfxDeath() {
+  playTone({ startFreq: 220, endFreq: 60, duration: 0.35, type: "sawtooth", gain: 0.18 });
+}
 
 // ---------------------------------------------------------------------------
 // Game state
@@ -97,18 +124,17 @@ let state = STATE_IDLE;
 
 let tick = 0;
 let worldDistance = 0;
+let currentScrollSpeed = BASE_SCROLL_SPEED;
 
-const player = { y: GROUND_Y, vy: 0 };
-let currentRunJumpStarts = new Set();
-let currentRunJumpReleases = new Set();
+const player = { y: GROUND_Y, vy: 0, squashX: 1, squashY: 1 };
 let jumpPressRequested = false;
 let jumpReleaseRequested = false;
 
-/** @type {{jumpStarts: Set<number>, jumpReleases: Set<number>, deathTick: number, y: number, vy: number, hue: number}[]} */
-let ghosts = [];
+let particles = [];
+let shakeTimer = 0;
+let shakeMagnitude = 0;
 
 let bestDistance = Number(localStorage.getItem("echoRunner.bestDistance") || 0);
-let bestRound = Number(localStorage.getItem("echoRunner.bestRound") || 1);
 
 const hudRound = document.getElementById("roundLine");
 const hudDistance = document.getElementById("distanceLine");
@@ -117,22 +143,25 @@ const overlayTitle = document.getElementById("messageTitle");
 const overlayBody = document.getElementById("messageBody");
 
 function metersLabel(distanceUnits) {
-  return Math.floor(distanceUnits / 20); // purely cosmetic scale-down to friendlier numbers
+  return Math.floor(distanceUnits / 20);
 }
 
 function updateHud() {
-  hudRound.textContent = `Round ${ghosts.length + 1}`;
-  hudDistance.textContent = `Distance: ${metersLabel(worldDistance)}m  ·  Best: ${metersLabel(bestDistance)}m`;
+  hudRound.textContent = `${metersLabel(worldDistance)}m`;
+  hudDistance.textContent = `Best: ${metersLabel(bestDistance)}m`;
 }
 
+// ---------------------------------------------------------------------------
+// Input
+// ---------------------------------------------------------------------------
 function requestJumpPress() {
+  ensureAudio();
   if (state === STATE_IDLE) {
     startRun();
     return;
   }
   jumpPressRequested = true;
 }
-
 function requestJumpRelease() {
   jumpReleaseRequested = true;
 }
@@ -140,7 +169,7 @@ function requestJumpRelease() {
 window.addEventListener("keydown", (e) => {
   if (e.code === "Space") {
     e.preventDefault();
-    if (e.repeat) return; // ignore OS key-repeat while held
+    if (e.repeat) return;
     requestJumpPress();
   }
 });
@@ -160,74 +189,78 @@ canvas.addEventListener("pointerup", (e) => {
 });
 
 // ---------------------------------------------------------------------------
+// Juice helpers
+// ---------------------------------------------------------------------------
+function spawnParticles(x, y, count, color) {
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 60 + Math.random() * 140;
+    particles.push({
+      x,
+      y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      life: 0.4 + Math.random() * 0.3,
+      maxLife: 0.7,
+      color,
+    });
+  }
+}
+
+function triggerShake(magnitude, duration) {
+  shakeMagnitude = magnitude;
+  shakeTimer = duration;
+}
+
+// ---------------------------------------------------------------------------
 // Round lifecycle
 // ---------------------------------------------------------------------------
 function startRun() {
   state = STATE_PLAYING;
   tick = 0;
   worldDistance = 0;
+  currentScrollSpeed = BASE_SCROLL_SPEED;
   player.y = GROUND_Y;
   player.vy = 0;
-  currentRunJumpStarts = new Set();
-  currentRunJumpReleases = new Set();
+  player.squashX = 1;
+  player.squashY = 1;
   jumpPressRequested = false;
   jumpReleaseRequested = false;
-  for (const g of ghosts) {
-    g.y = GROUND_Y;
-    g.vy = 0;
-  }
+  particles = [];
+  for (const ob of OBSTACLE_COURSE) ob.cleared = false;
   overlay.classList.add("hidden");
   updateHud();
 }
 
-let deathReason = "";
-
 function endRun() {
   state = STATE_IDLE;
+  sfxDeath();
+  triggerShake(10, 0.3);
+  spawnParticles(PLAYER_X, player.y - PLAYER_RADIUS, 18, "255,120,90");
 
   const survivedDistance = worldDistance;
-  const priorBest = bestDistance; // captured before updating — see isNewRecord below
-  const isNewRecord = survivedDistance > priorBest;
+  const isNewRecord = survivedDistance > bestDistance;
   bestDistance = Math.max(bestDistance, survivedDistance);
-  bestRound = Math.max(bestRound, ghosts.length + 1);
   localStorage.setItem("echoRunner.bestDistance", String(bestDistance));
-  localStorage.setItem("echoRunner.bestRound", String(bestRound));
 
-  // Only add a ghost on a new personal best, not on every death. Ghosts
-  // necessarily cluster around wherever you keep dying (everyone who's ever
-  // survived had to pass that point too), so adding one on every failed
-  // repeat made the earliest obstacle get crowded fastest while later,
-  // never-reached parts of the course stayed empty — the opposite of a fair
-  // ramp. Gating on "new record" means difficulty only grows once you've
-  // actually demonstrated you can handle the current ghost set.
-  if (isNewRecord && ghosts.length < SAFETY_MAX_GHOSTS) {
-    ghosts.push({
-      jumpStarts: currentRunJumpStarts,
-      jumpReleases: currentRunJumpReleases,
-      deathTick: tick,
-      y: GROUND_Y,
-      vy: 0,
-      hue: (ghosts.length * 47) % 360,
-    });
-  }
-
-  overlayTitle.textContent = isNewRecord ? `New best! Round ${ghosts.length} complete` : `Try again`;
-  const progressLine = isNewRecord
-    ? `Now dodge ${ghosts.length} ghost${ghosts.length === 1 ? "" : "s"} of yourself.`
-    : `Beat ${metersLabel(priorBest)}m to add a new ghost. Still dodging ${ghosts.length} ghost${ghosts.length === 1 ? "" : "s"}.`;
-  overlayBody.innerHTML = `You reached ${metersLabel(survivedDistance)}m.<br />Best: ${metersLabel(bestDistance)}m over ${bestRound} rounds.<br />${progressLine}` +
-    `<br /><span style="opacity:0.6;font-size:12px">${deathReason}</span>`;
+  overlayTitle.textContent = isNewRecord ? "New best!" : "Run over";
+  overlayBody.innerHTML = `You reached ${metersLabel(survivedDistance)}m.<br />Best: ${metersLabel(bestDistance)}m.`;
   overlay.classList.remove("hidden");
   updateHud();
 }
 
 // ---------------------------------------------------------------------------
-// Fixed-timestep simulation step
+// Simulation
 // ---------------------------------------------------------------------------
 function integrate(entity) {
   entity.vy += GRAVITY * FIXED_DT;
   entity.y += entity.vy * FIXED_DT;
   if (entity.y > GROUND_Y) {
+    if (entity.vy > 200) {
+      // landed with real speed — a satisfying squash
+      player.squashX = 1.35;
+      player.squashY = 0.7;
+    }
     entity.y = GROUND_Y;
     entity.vy = 0;
   }
@@ -237,79 +270,60 @@ function isGrounded(entity) {
   return entity.y >= GROUND_Y - GROUND_EPSILON;
 }
 
-function applyJumpCutIfRising(entity) {
-  if (entity.vy < 0) {
-    entity.vy *= JUMP_CUT_MULTIPLIER;
-  }
-}
-
 function step() {
   tick += 1;
-  worldDistance += SCROLL_SPEED * FIXED_DT;
+  currentScrollSpeed = BASE_SCROLL_SPEED + (MAX_SCROLL_SPEED - BASE_SCROLL_SPEED) * Math.min(1, worldDistance / SPEED_RAMP_DISTANCE);
+  worldDistance += currentScrollSpeed * FIXED_DT;
 
   if (jumpPressRequested) {
     if (isGrounded(player)) {
       player.vy = JUMP_VELOCITY;
-      currentRunJumpStarts.add(tick);
+      player.squashX = 0.7;
+      player.squashY = 1.35;
+      sfxJump();
+      spawnParticles(PLAYER_X, GROUND_Y, 6, "255,255,255");
     }
     jumpPressRequested = false;
   }
   if (jumpReleaseRequested) {
-    applyJumpCutIfRising(player);
-    currentRunJumpReleases.add(tick);
+    if (player.vy < 0) player.vy *= JUMP_CUT_MULTIPLIER;
     jumpReleaseRequested = false;
   }
   integrate(player);
 
-  for (const g of ghosts) {
-    if (tick >= g.deathTick) continue; // this ghost had already died by this point in its run
-    if (g.jumpStarts.has(tick) && isGrounded(g)) {
-      g.vy = JUMP_VELOCITY;
-    }
-    if (g.jumpReleases.has(tick)) {
-      applyJumpCutIfRising(g);
-    }
-    integrate(g);
-  }
+  // Squash/stretch relaxes back toward normal each tick.
+  player.squashX += (1 - player.squashX) * 0.2;
+  player.squashY += (1 - player.squashY) * 0.2;
 
-  // Obstacle collision — only obstacles near the player's fixed X matter.
-  // OBSTACLE_COURSE is sorted by increasing spawnDistance, so screenX is
-  // monotonically increasing as we iterate — the break below is safe once
-  // we're past the collision window, and correctly skips already-checked
-  // (already-passed) obstacles is not needed since 300 obstacles/tick is
-  // cheap regardless.
+  // Particles
+  for (const p of particles) {
+    p.x += p.vx * FIXED_DT;
+    p.y += p.vy * FIXED_DT;
+    p.vy += GRAVITY * 0.3 * FIXED_DT;
+    p.life -= FIXED_DT;
+  }
+  particles = particles.filter((p) => p.life > 0);
+
+  if (shakeTimer > 0) shakeTimer = Math.max(0, shakeTimer - FIXED_DT);
+
+  // Obstacles: collision + "cleared" pop for satisfaction.
   for (const ob of OBSTACLE_COURSE) {
     const screenX = PLAYER_X + (ob.spawnDistance - worldDistance);
     const halfW = ob.width / 2;
+
+    if (!ob.cleared && screenX < PLAYER_X - halfW - PLAYER_RADIUS) {
+      ob.cleared = true;
+      sfxClear();
+    }
+
     if (screenX + halfW > PLAYER_X - PLAYER_RADIUS && screenX - halfW < PLAYER_X + PLAYER_RADIUS) {
       const obstacleTopY = GROUND_Y - ob.height;
       if (player.y + PLAYER_RADIUS > obstacleTopY) {
-        deathReason = `Hit obstacle: player.y=${player.y.toFixed(1)} (needed <= ${(obstacleTopY - PLAYER_RADIUS).toFixed(1)}), tick=${tick}, jumpedThisRun=${currentRunJumpStarts.size}`;
         endRun();
         return;
       }
     }
-    if (screenX > PLAYER_X + 40) break; // obstacles are in spawn order — nothing further matters yet
-  }
-
-  // Ghost collision — same fixed X for everyone ("the lane"), so it's a
-  // Y-proximity check, but ONLY while both are airborne. Everyone starts
-  // (and spends most of their time) grounded at the same resting height —
-  // that's the normal, safe default state, not a collision. Requiring both
-  // to be mid-jump means a collision only happens when your jump arc
-  // actually crosses a ghost's jump arc in the air, which is also the more
-  // interesting rule: avoiding a ghost is about not jumping in the same
-  // time-window as it did, not about avoiding the ground.
-  for (const g of ghosts) {
-    if (tick >= g.deathTick) continue;
-    const playerHeight = GROUND_Y - player.y;
-    const ghostHeight = GROUND_Y - g.y;
-    if (playerHeight < GHOST_COLLIDE_MIN_HEIGHT_ABOVE_GROUND || ghostHeight < GHOST_COLLIDE_MIN_HEIGHT_ABOVE_GROUND) continue;
-    if (Math.abs(player.y - g.y) < GHOST_COLLIDE_Y_THRESHOLD) {
-      deathReason = `Hit ghost: player.y=${player.y.toFixed(1)}, ghost.y=${g.y.toFixed(1)}, diff=${Math.abs(player.y - g.y).toFixed(1)}, tick=${tick}`;
-      endRun();
-      return;
-    }
+    if (screenX > PLAYER_X + 40) break;
   }
 }
 
@@ -317,20 +331,30 @@ function step() {
 // Rendering
 // ---------------------------------------------------------------------------
 function render() {
-  // Sky
+  ctx.save();
+  if (shakeTimer > 0) {
+    const s = shakeMagnitude * (shakeTimer / 0.3);
+    ctx.translate((Math.random() - 0.5) * s, (Math.random() - 0.5) * s);
+  }
+
   const sky = ctx.createLinearGradient(0, 0, 0, LOGICAL_HEIGHT);
   sky.addColorStop(0, "#2b2d5e");
   sky.addColorStop(1, "#4a3f7a");
   ctx.fillStyle = sky;
-  ctx.fillRect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+  ctx.fillRect(-20, -20, LOGICAL_WIDTH + 40, LOGICAL_HEIGHT + 40);
 
-  // Ground
+  // Ground with scrolling dashes for a sense of speed.
   ctx.fillStyle = "#12121f";
-  ctx.fillRect(0, GROUND_Y, LOGICAL_WIDTH, LOGICAL_HEIGHT - GROUND_Y);
-  ctx.strokeStyle = "rgba(255,255,255,0.15)";
+  ctx.fillRect(-20, GROUND_Y, LOGICAL_WIDTH + 40, LOGICAL_HEIGHT - GROUND_Y + 20);
+  ctx.strokeStyle = "rgba(255,255,255,0.25)";
+  ctx.lineWidth = 3;
+  const dashSpacing = 40;
+  const offset = worldDistance % dashSpacing;
   ctx.beginPath();
-  ctx.moveTo(0, GROUND_Y);
-  ctx.lineTo(LOGICAL_WIDTH, GROUND_Y);
+  for (let x = -offset; x < LOGICAL_WIDTH; x += dashSpacing) {
+    ctx.moveTo(x, GROUND_Y + 6);
+    ctx.lineTo(x + 18, GROUND_Y + 6);
+  }
   ctx.stroke();
 
   // Obstacles
@@ -341,26 +365,30 @@ function render() {
     ctx.fillRect(screenX - ob.width / 2, GROUND_Y - ob.height, ob.width, ob.height);
   }
 
-  // Ghosts — deliberately NOT snapped to ground on death; keep showing each
-  // entity's actual last simulated position so a death-frame screenshot is
-  // trustworthy for diagnosis instead of misleadingly resetting the pose.
-  for (const g of ghosts) {
-    if (tick >= g.deathTick && state === STATE_PLAYING) continue;
-    ctx.fillStyle = `hsla(${g.hue}, 70%, 65%, 0.45)`;
+  // Particles
+  for (const p of particles) {
+    const alpha = Math.max(0, p.life / p.maxLife);
+    ctx.fillStyle = `rgba(${p.color},${alpha})`;
     ctx.beginPath();
-    ctx.arc(PLAYER_X, g.y - GHOST_RADIUS, GHOST_RADIUS, 0, Math.PI * 2);
+    ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
     ctx.fill();
   }
 
-  // Player — see the ghost-rendering comment above; same reasoning.
+  // Player, with squash/stretch
+  ctx.save();
+  ctx.translate(PLAYER_X, player.y);
+  ctx.scale(player.squashX, player.squashY);
   ctx.fillStyle = "#ffffff";
   ctx.beginPath();
-  ctx.arc(PLAYER_X, player.y - PLAYER_RADIUS, PLAYER_RADIUS, 0, Math.PI * 2);
+  ctx.arc(0, -PLAYER_RADIUS, PLAYER_RADIUS, 0, Math.PI * 2);
   ctx.fill();
+  ctx.restore();
+
+  ctx.restore();
 }
 
 // ---------------------------------------------------------------------------
-// Main loop — fixed timestep accumulator, decoupled from actual frame rate.
+// Main loop
 // ---------------------------------------------------------------------------
 let lastTime = performance.now();
 let accumulator = 0;
@@ -369,7 +397,7 @@ function frame(now) {
   requestAnimationFrame(frame);
   let delta = (now - lastTime) / 1000;
   lastTime = now;
-  if (delta > 0.25) delta = 0.25; // clamp huge gaps (tab switch, etc.)
+  if (delta > 0.25) delta = 0.25;
   accumulator += delta;
 
   while (accumulator >= FIXED_DT) {
