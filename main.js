@@ -64,11 +64,16 @@ function mulberry32(seed) {
   };
 }
 
-// Milestones — each unlocks a new obstacle type at a distance threshold, a
-// gentle onboarding ramp instead of hand-authored levels (see CLAUDE.md).
+// Stages — every 100m (2000 world units) is a "stage," announced with a
+// toast. First few stages unlock a new obstacle type; later ones are just a
+// celebration beat, since difficulty keeps ramping via speed regardless.
+// This is the "procedural milestone" approach to a sense of progress
+// without hand-authoring levels (see CLAUDE.md).
+const STAGE_DISTANCE_STEP = 2000; // 100m
+
 // Max jump clears ~101 units (v²/2g + radius margin) — ground obstacle
 // heights stay well under that so every one is always physically clearable.
-const OVERHEAD_INTRO_DISTANCE = 1200;
+const OVERHEAD_INTRO_DISTANCE = STAGE_DISTANCE_STEP * 1; // 100m
 const OVERHEAD_CHANCE = 0.35;
 // Standing top is a fixed 604 (GROUND_Y - PLAYER_RADIUS). Clearance is kept
 // in a range where GROUND_Y - clearance always lands a bit ABOVE 604, so
@@ -78,7 +83,8 @@ const OVERHEAD_CHANCE = 0.35;
 const OVERHEAD_CLEARANCE_MIN = 6;
 const OVERHEAD_CLEARANCE_MAX = 14;
 
-const FLYING_INTRO_DISTANCE = 2600;
+const FLYING_INTRO_DISTANCE = STAGE_DISTANCE_STEP * 2; // 200m
+const MIXED_STAGE = 4; // stage 4 (300m+) is the "everything together" flavor beat
 const FLYING_CHANCE = 0.4; // of eligible (non-overhead) obstacles past the intro distance
 
 // Flying obstacles get a compact hitbox matching their actual (small) visual
@@ -99,10 +105,16 @@ function obstacleScreenX(ob) {
   return ob.flying ? baseScreenX - ob.extraApproach : baseScreenX;
 }
 
-const MILESTONES = [
-  { distance: OVERHEAD_INTRO_DISTANCE, message: "Duck! Obstacles overhead now" },
-  { distance: FLYING_INTRO_DISTANCE, message: "Incoming flyers!" },
-];
+function stageForDistance(distance) {
+  return Math.floor(distance / STAGE_DISTANCE_STEP) + 1;
+}
+
+function stageMessage(stageNum) {
+  if (stageNum === 2) return "Stage 2 — duck! Obstacles overhead now";
+  if (stageNum === 3) return "Stage 3 — incoming flyers!";
+  if (stageNum === MIXED_STAGE) return "Stage 4 — everything, all at once";
+  return `Stage ${stageNum}`;
+}
 
 function buildObstacleCourse(seed) {
   const rand = mulberry32(seed);
@@ -202,7 +214,7 @@ let particles = [];
 let shakeTimer = 0;
 let shakeMagnitude = 0;
 
-let announcedMilestones = new Set();
+let lastAnnouncedStage = 1; // stage 1 is the start; nothing to announce for it
 let milestoneToastText = "";
 let milestoneToastTimer = 0;
 
@@ -229,7 +241,7 @@ function metersLabel(distanceUnits) {
 }
 
 function updateHud() {
-  hudRound.textContent = `${metersLabel(worldDistance)}m`;
+  hudRound.textContent = `${metersLabel(worldDistance)}m  ·  Stage ${stageForDistance(worldDistance)}`;
   hudDistance.textContent = `Best: ${metersLabel(bestDistance)}m`;
 }
 
@@ -317,7 +329,7 @@ function startRun() {
   jumpPressRequested = false;
   jumpReleaseRequested = false;
   particles = [];
-  announcedMilestones = new Set();
+  lastAnnouncedStage = 1;
   milestoneToastText = "";
   milestoneToastTimer = 0;
   OBSTACLE_COURSE = buildObstacleCourse(Date.now()); // fresh layout every run
@@ -368,12 +380,11 @@ function step() {
   currentScrollSpeed = BASE_SCROLL_SPEED + (MAX_SCROLL_SPEED - BASE_SCROLL_SPEED) * Math.min(1, worldDistance / SPEED_RAMP_DISTANCE);
   worldDistance += currentScrollSpeed * FIXED_DT;
 
-  for (const m of MILESTONES) {
-    if (worldDistance >= m.distance && !announcedMilestones.has(m)) {
-      announcedMilestones.add(m);
-      milestoneToastText = m.message;
-      milestoneToastTimer = 2.5;
-    }
+  const stageNow = stageForDistance(worldDistance);
+  if (stageNow > lastAnnouncedStage) {
+    lastAnnouncedStage = stageNow;
+    milestoneToastText = stageMessage(stageNow);
+    milestoneToastTimer = 2.5;
   }
   if (milestoneToastTimer > 0) milestoneToastTimer = Math.max(0, milestoneToastTimer - FIXED_DT);
 

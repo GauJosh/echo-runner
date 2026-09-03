@@ -92,3 +92,13 @@ validate a novel mechanic's fun-factor with the simplest possible version
 *before* building out its full complexity (recording, replay, collision
 rules, difficulty pacing) — tuning difficulty on an unproven-fun mechanic is
 solving the wrong problem.
+
+**2026-09-03 (current state): core loop confirmed fun.** Since the ghost
+drop: added overhead ("duck under") and flying (bird) obstacle types, a duck
+input (ArrowDown/Ctrl/Shift — keyboard only so far, no touch control yet),
+and a stage system (every 100m is a announced "stage," first few unlock new
+obstacle types, later ones are just a celebration beat). Course is
+regenerated randomly each run. User confirmed it's fun to play. Two known
+open items: (1) duck has no touch/mobile input yet — needed before any app
+packaging; (2) visuals are still plain colored shapes — the user asked about
+prioritizing visual polish next.
