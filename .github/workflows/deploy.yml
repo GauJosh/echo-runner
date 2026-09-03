@@ -1,7 +1,11 @@
 name: Deploy to GitHub Pages
 
-# Static site, no build step -- this just publishes the repo (minus a small
-# exclude list of dev-only files) straight to GitHub Pages via Actions.
+# Static site, no build step -- copies an explicit allowlist of the actual
+# game files into _site/ and publishes just that. (First version tried
+# upload-pages-artifact's `exclude` input to keep dev-only files like
+# CLAUDE.md off the public site, but that input isn't actually honored by
+# the action -- verified it still 200'd after deploy. An explicit allowlist
+# is more reliable than an exclude list anyway.)
 
 on:
   push:
@@ -32,16 +36,15 @@ jobs:
       - name: Configure Pages
         uses: actions/configure-pages@v5
 
+      - name: Prepare site directory
+        run: |
+          mkdir _site
+          cp index.html main.js styles.css _site/
+
       - name: Upload site artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: .
-          exclude: |
-            .git/**
-            .github/**
-            CLAUDE.md
-            serve.js
-            README.md
+          path: _site
 
       - name: Deploy to GitHub Pages
         id: deployment
