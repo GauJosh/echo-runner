@@ -71,6 +71,23 @@ const OVERHEAD_CLEARANCE_MAX = 30;
 const FLYING_INTRO_DISTANCE = 2600;
 const FLYING_CHANCE = 0.4; // of eligible (non-overhead) obstacles past the intro distance
 
+// Flying obstacles get a compact hitbox matching their actual (small) visual
+// size, not the full ground/overhead box they're tagged with — using the
+// full box caused invisible collisions well above/below the visible bird.
+// They also gain extra closing speed once on screen, so they read as
+// darting toward the player rather than drifting in with the scenery.
+const BIRD_HITBOX_HALF_HEIGHT = 22;
+const FLYING_EXTRA_SPEED = 90;
+
+function birdCenterY(ob) {
+  return ob.type === "overhead" ? GROUND_Y - ob.clearance - 10 : GROUND_Y - ob.height / 2;
+}
+
+function obstacleScreenX(ob) {
+  const baseScreenX = PLAYER_X + (ob.spawnDistance - worldDistance);
+  return ob.flying ? baseScreenX - ob.extraApproach : baseScreenX;
+}
+
 const MILESTONES = [
   { distance: OVERHEAD_INTRO_DISTANCE, message: "Duck! Obstacles overhead now" },
   { distance: FLYING_INTRO_DISTANCE, message: "Incoming flyers!" },
@@ -87,14 +104,14 @@ function buildObstacleCourse(seed) {
     if (distance > OVERHEAD_INTRO_DISTANCE && rand() < OVERHEAD_CHANCE) {
       const clearance = OVERHEAD_CLEARANCE_MIN + rand() * (OVERHEAD_CLEARANCE_MAX - OVERHEAD_CLEARANCE_MIN);
       const flying = distance > FLYING_INTRO_DISTANCE && rand() < FLYING_CHANCE;
-      obstacles.push({ spawnDistance: distance, width, type: "overhead", clearance, flying, cleared: false });
+      obstacles.push({ spawnDistance: distance, width, type: "overhead", clearance, flying, extraApproach: 0, cleared: false });
     } else {
       // Randomized per obstacle, and the whole course is reseeded fresh each
       // run (see startRun) — never the same layout twice, always within a
       // height range that stays comfortably clearable.
       const height = 40 + Math.floor(rand() * 40);
       const flying = distance > FLYING_INTRO_DISTANCE && rand() < FLYING_CHANCE;
-      obstacles.push({ spawnDistance: distance, width, type: "ground", height, flying, cleared: false });
+      obstacles.push({ spawnDistance: distance, width, type: "ground", height, flying, extraApproach: 0, cleared: false });
     }
   }
   return obstacles;
@@ -362,7 +379,10 @@ function step() {
 
   // Obstacles: collision + "cleared" pop for satisfaction.
   for (const ob of OBSTACLE_COURSE) {
-    const screenX = PLAYER_X + (ob.spawnDistance - worldDistance);
+    if (ob.flying && ob.spawnDistance - worldDistance < LOGICAL_WIDTH + 60) {
+      ob.extraApproach += FLYING_EXTRA_SPEED * FIXED_DT;
+    }
+    const screenX = obstacleScreenX(ob);
     const halfW = ob.width / 2;
 
     if (!ob.cleared && screenX < PLAYER_X - halfW - PLAYER_RADIUS) {
@@ -371,7 +391,15 @@ function step() {
     }
 
     if (screenX + halfW > PLAYER_X - PLAYER_RADIUS && screenX - halfW < PLAYER_X + PLAYER_RADIUS) {
-      if (ob.type === "overhead") {
+      if (ob.flying) {
+        // Compact band matching the actual bird graphic, not the full
+        // ground/overhead box — see the comment by BIRD_HITBOX_HALF_HEIGHT.
+        const centerY = birdCenterY(ob);
+        if (player.y + PLAYER_RADIUS > centerY - BIRD_HITBOX_HALF_HEIGHT && player.y - PLAYER_RADIUS < centerY + BIRD_HITBOX_HALF_HEIGHT) {
+          endRun();
+          return;
+        }
+      } else if (ob.type === "overhead") {
         // Hangs from the top down to a low clearance — colliding means the
         // player's head rose too high (jumped) instead of staying grounded.
         const obstacleBottomY = GROUND_Y - ob.clearance;
@@ -387,7 +415,6 @@ function step() {
         }
       }
     }
-    if (screenX > PLAYER_X + 40) break;
   }
 }
 
@@ -449,19 +476,15 @@ function render() {
   // exact same hitbox/rule as their type, just drawn as a bobbing bird
   // (amber) instead of a static block — new presentation, same mechanic.
   for (const ob of OBSTACLE_COURSE) {
-    const screenX = PLAYER_X + (ob.spawnDistance - worldDistance);
+    const screenX = obstacleScreenX(ob); // must match the hitbox calculation exactly
     if (screenX < -60 || screenX > LOGICAL_WIDTH + 60) continue;
 
-    if (ob.type === "overhead") {
+    if (ob.flying) {
+      drawBird(screenX, birdCenterY(ob), ob.width);
+    } else if (ob.type === "overhead") {
       const bottomY = GROUND_Y - ob.clearance;
-      if (ob.flying) {
-        drawBird(screenX, bottomY - 10, ob.width);
-      } else {
-        ctx.fillStyle = "#4dd9ff";
-        ctx.fillRect(screenX - ob.width / 2, -20, ob.width, bottomY + 20);
-      }
-    } else if (ob.flying) {
-      drawBird(screenX, GROUND_Y - ob.height / 2, ob.width);
+      ctx.fillStyle = "#4dd9ff";
+      ctx.fillRect(screenX - ob.width / 2, -20, ob.width, bottomY + 20);
     } else {
       ctx.fillStyle = "#ff5d5d";
       ctx.fillRect(screenX - ob.width / 2, GROUND_Y - ob.height, ob.width, ob.height);
