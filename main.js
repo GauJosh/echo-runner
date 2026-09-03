@@ -281,13 +281,38 @@ window.addEventListener("keyup", (e) => {
     isDucking = false;
   }
 });
+// Touch/mouse split: upper ~55% of the screen = jump, lower = duck. Keyboard
+// (Space / ArrowDown / Ctrl / Shift) works independently and simultaneously
+// — this only covers the touch case, which had no duck input at all before.
+let activeTouchZone = null; // 'jump' | 'duck' | null, tracks what this pointer press started as
+
+function touchZoneForEvent(e) {
+  const rect = canvas.getBoundingClientRect();
+  const fracY = (e.clientY - rect.top) / rect.height;
+  return fracY < 0.55 ? "jump" : "duck";
+}
+
 canvas.addEventListener("pointerdown", (e) => {
   e.preventDefault();
-  requestJumpPress();
+  if (state === STATE_IDLE) {
+    requestJumpPress(); // tap anywhere starts the run
+    return;
+  }
+  activeTouchZone = touchZoneForEvent(e);
+  if (activeTouchZone === "duck") {
+    isDucking = true;
+  } else {
+    requestJumpPress();
+  }
 });
 canvas.addEventListener("pointerup", (e) => {
   e.preventDefault();
-  requestJumpRelease();
+  if (activeTouchZone === "duck") {
+    isDucking = false;
+  } else {
+    requestJumpRelease();
+  }
+  activeTouchZone = null;
 });
 
 // ---------------------------------------------------------------------------
