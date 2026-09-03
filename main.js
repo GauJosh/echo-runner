@@ -38,6 +38,20 @@ const PLAYER_RADIUS = 16;
 const GHOST_RADIUS = 14;
 const GROUND_EPSILON = 0.5;
 const GHOST_COLLIDE_Y_THRESHOLD = PLAYER_RADIUS + GHOST_RADIUS - 6; // slight forgiveness
+// Jump peak is ~117 units above GROUND_Y. Everyone passes briefly through the
+// near-ground band on every single jump (launch and landing) — without this
+// gate, two completely unrelated jumps coincidentally clipping that band at
+// the same tick registers as a "collision" far more often than intended,
+// since it's just launch/landing noise, not two jump arcs actually crossing
+// in the air. Requiring both to be at least this far off the ground before
+// checking proximity filters that noise out.
+const GHOST_COLLIDE_MIN_HEIGHT_ABOVE_GROUND = 30;
+// Variable jump height (Mario-style "jump cut"): releasing early while still
+// rising scales velocity down, producing a shorter hop. Holding through the
+// natural peak has no extra effect (already at max height for this press).
+// This gives the player a second axis of control beyond WHEN to jump — HOW
+// HIGH — so avoiding a ghost doesn't depend entirely on split-second timing.
+const JUMP_CUT_MULTIPLIER = 0.45;
 const SAFETY_MAX_GHOSTS = 30; // performance safety valve, not a designed difficulty cap — see CLAUDE.md
 
 const MIN_GAP_SECONDS = 1.15;
@@ -85,10 +99,12 @@ let tick = 0;
 let worldDistance = 0;
 
 const player = { y: GROUND_Y, vy: 0 };
-let currentRunJumpTicks = new Set();
-let jumpRequested = false;
+let currentRunJumpStarts = new Set();
+let currentRunJumpReleases = new Set();
+let jumpPressRequested = false;
+let jumpReleaseRequested = false;
 
-/** @type {{jumpTicks: Set<number>, deathTick: number, y: number, vy: number, hue: number}[]} */
+/** @type {{jumpStarts: Set<number>, jumpReleases: Set<number>, deathTick: number, y: number, vy: number, hue: number}[]} */
 let ghosts = [];
 
 let bestDistance = Number(localStorage.getItem("echoRunner.bestDistance") || 0);
@@ -109,23 +125,38 @@ function updateHud() {
   hudDistance.textContent = `Distance: ${metersLabel(worldDistance)}m  ·  Best: ${metersLabel(bestDistance)}m`;
 }
 
-function requestJump() {
+function requestJumpPress() {
   if (state === STATE_IDLE) {
     startRun();
     return;
   }
-  jumpRequested = true;
+  jumpPressRequested = true;
+}
+
+function requestJumpRelease() {
+  jumpReleaseRequested = true;
 }
 
 window.addEventListener("keydown", (e) => {
   if (e.code === "Space") {
     e.preventDefault();
-    requestJump();
+    if (e.repeat) return; // ignore OS key-repeat while held
+    requestJumpPress();
+  }
+});
+window.addEventListener("keyup", (e) => {
+  if (e.code === "Space") {
+    e.preventDefault();
+    requestJumpRelease();
   }
 });
 canvas.addEventListener("pointerdown", (e) => {
   e.preventDefault();
-  requestJump();
+  requestJumpPress();
+});
+canvas.addEventListener("pointerup", (e) => {
+  e.preventDefault();
+  requestJumpRelease();
 });
 
 // ---------------------------------------------------------------------------
@@ -137,8 +168,10 @@ function startRun() {
   worldDistance = 0;
   player.y = GROUND_Y;
   player.vy = 0;
-  currentRunJumpTicks = new Set();
-  jumpRequested = false;
+  currentRunJumpStarts = new Set();
+  currentRunJumpReleases = new Set();
+  jumpPressRequested = false;
+  jumpReleaseRequested = false;
   for (const g of ghosts) {
     g.y = GROUND_Y;
     g.vy = 0;
@@ -147,18 +180,30 @@ function startRun() {
   updateHud();
 }
 
+let deathReason = "";
+
 function endRun() {
   state = STATE_IDLE;
 
   const survivedDistance = worldDistance;
+  const priorBest = bestDistance; // captured before updating — see isNewRecord below
+  const isNewRecord = survivedDistance > priorBest;
   bestDistance = Math.max(bestDistance, survivedDistance);
   bestRound = Math.max(bestRound, ghosts.length + 1);
   localStorage.setItem("echoRunner.bestDistance", String(bestDistance));
   localStorage.setItem("echoRunner.bestRound", String(bestRound));
 
-  if (ghosts.length < SAFETY_MAX_GHOSTS) {
+  // Only add a ghost on a new personal best, not on every death. Ghosts
+  // necessarily cluster around wherever you keep dying (everyone who's ever
+  // survived had to pass that point too), so adding one on every failed
+  // repeat made the earliest obstacle get crowded fastest while later,
+  // never-reached parts of the course stayed empty — the opposite of a fair
+  // ramp. Gating on "new record" means difficulty only grows once you've
+  // actually demonstrated you can handle the current ghost set.
+  if (isNewRecord && ghosts.length < SAFETY_MAX_GHOSTS) {
     ghosts.push({
-      jumpTicks: currentRunJumpTicks,
+      jumpStarts: currentRunJumpStarts,
+      jumpReleases: currentRunJumpReleases,
       deathTick: tick,
       y: GROUND_Y,
       vy: 0,
@@ -166,8 +211,12 @@ function endRun() {
     });
   }
 
-  overlayTitle.textContent = `Round ${ghosts.length} complete`;
-  overlayBody.innerHTML = `You reached ${metersLabel(survivedDistance)}m.<br />Best: ${metersLabel(bestDistance)}m over ${bestRound} rounds.<br />Now dodge ${ghosts.length} ghost${ghosts.length === 1 ? "" : "s"} of yourself.`;
+  overlayTitle.textContent = isNewRecord ? `New best! Round ${ghosts.length} complete` : `Try again`;
+  const progressLine = isNewRecord
+    ? `Now dodge ${ghosts.length} ghost${ghosts.length === 1 ? "" : "s"} of yourself.`
+    : `Beat ${metersLabel(priorBest)}m to add a new ghost. Still dodging ${ghosts.length} ghost${ghosts.length === 1 ? "" : "s"}.`;
+  overlayBody.innerHTML = `You reached ${metersLabel(survivedDistance)}m.<br />Best: ${metersLabel(bestDistance)}m over ${bestRound} rounds.<br />${progressLine}` +
+    `<br /><span style="opacity:0.6;font-size:12px">${deathReason}</span>`;
   overlay.classList.remove("hidden");
   updateHud();
 }
@@ -188,23 +237,37 @@ function isGrounded(entity) {
   return entity.y >= GROUND_Y - GROUND_EPSILON;
 }
 
+function applyJumpCutIfRising(entity) {
+  if (entity.vy < 0) {
+    entity.vy *= JUMP_CUT_MULTIPLIER;
+  }
+}
+
 function step() {
   tick += 1;
   worldDistance += SCROLL_SPEED * FIXED_DT;
 
-  if (jumpRequested) {
+  if (jumpPressRequested) {
     if (isGrounded(player)) {
       player.vy = JUMP_VELOCITY;
-      currentRunJumpTicks.add(tick);
+      currentRunJumpStarts.add(tick);
     }
-    jumpRequested = false;
+    jumpPressRequested = false;
+  }
+  if (jumpReleaseRequested) {
+    applyJumpCutIfRising(player);
+    currentRunJumpReleases.add(tick);
+    jumpReleaseRequested = false;
   }
   integrate(player);
 
   for (const g of ghosts) {
     if (tick >= g.deathTick) continue; // this ghost had already died by this point in its run
-    if (g.jumpTicks.has(tick) && isGrounded(g)) {
+    if (g.jumpStarts.has(tick) && isGrounded(g)) {
       g.vy = JUMP_VELOCITY;
+    }
+    if (g.jumpReleases.has(tick)) {
+      applyJumpCutIfRising(g);
     }
     integrate(g);
   }
@@ -221,6 +284,7 @@ function step() {
     if (screenX + halfW > PLAYER_X - PLAYER_RADIUS && screenX - halfW < PLAYER_X + PLAYER_RADIUS) {
       const obstacleTopY = GROUND_Y - ob.height;
       if (player.y + PLAYER_RADIUS > obstacleTopY) {
+        deathReason = `Hit obstacle: player.y=${player.y.toFixed(1)} (needed <= ${(obstacleTopY - PLAYER_RADIUS).toFixed(1)}), tick=${tick}, jumpedThisRun=${currentRunJumpStarts.size}`;
         endRun();
         return;
       }
@@ -228,11 +292,21 @@ function step() {
     if (screenX > PLAYER_X + 40) break; // obstacles are in spawn order — nothing further matters yet
   }
 
-  // Ghost collision — same fixed X for everyone ("the lane"), so it's purely
-  // a Y-proximity check at the same tick.
+  // Ghost collision — same fixed X for everyone ("the lane"), so it's a
+  // Y-proximity check, but ONLY while both are airborne. Everyone starts
+  // (and spends most of their time) grounded at the same resting height —
+  // that's the normal, safe default state, not a collision. Requiring both
+  // to be mid-jump means a collision only happens when your jump arc
+  // actually crosses a ghost's jump arc in the air, which is also the more
+  // interesting rule: avoiding a ghost is about not jumping in the same
+  // time-window as it did, not about avoiding the ground.
   for (const g of ghosts) {
     if (tick >= g.deathTick) continue;
+    const playerHeight = GROUND_Y - player.y;
+    const ghostHeight = GROUND_Y - g.y;
+    if (playerHeight < GHOST_COLLIDE_MIN_HEIGHT_ABOVE_GROUND || ghostHeight < GHOST_COLLIDE_MIN_HEIGHT_ABOVE_GROUND) continue;
     if (Math.abs(player.y - g.y) < GHOST_COLLIDE_Y_THRESHOLD) {
+      deathReason = `Hit ghost: player.y=${player.y.toFixed(1)}, ghost.y=${g.y.toFixed(1)}, diff=${Math.abs(player.y - g.y).toFixed(1)}, tick=${tick}`;
       endRun();
       return;
     }
@@ -267,20 +341,21 @@ function render() {
     ctx.fillRect(screenX - ob.width / 2, GROUND_Y - ob.height, ob.width, ob.height);
   }
 
-  // Ghosts
+  // Ghosts — deliberately NOT snapped to ground on death; keep showing each
+  // entity's actual last simulated position so a death-frame screenshot is
+  // trustworthy for diagnosis instead of misleadingly resetting the pose.
   for (const g of ghosts) {
     if (tick >= g.deathTick && state === STATE_PLAYING) continue;
-    const y = state === STATE_PLAYING ? g.y : GROUND_Y;
     ctx.fillStyle = `hsla(${g.hue}, 70%, 65%, 0.45)`;
     ctx.beginPath();
-    ctx.arc(PLAYER_X, y - GHOST_RADIUS, GHOST_RADIUS, 0, Math.PI * 2);
+    ctx.arc(PLAYER_X, g.y - GHOST_RADIUS, GHOST_RADIUS, 0, Math.PI * 2);
     ctx.fill();
   }
 
-  // Player
+  // Player — see the ghost-rendering comment above; same reasoning.
   ctx.fillStyle = "#ffffff";
   ctx.beginPath();
-  ctx.arc(PLAYER_X, (state === STATE_PLAYING ? player.y : GROUND_Y) - PLAYER_RADIUS, PLAYER_RADIUS, 0, Math.PI * 2);
+  ctx.arc(PLAYER_X, player.y - PLAYER_RADIUS, PLAYER_RADIUS, 0, Math.PI * 2);
   ctx.fill();
 }
 
